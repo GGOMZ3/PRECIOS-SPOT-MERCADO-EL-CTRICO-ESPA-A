@@ -1,130 +1,178 @@
-import os
-import requests
 import json
-import streamlit as st
+import requests
 import pandas as pd
 import plotly.express as px
+import streamlit as st
 from datetime import datetime
 
-# Verificar y crear el archivo JSON si no existe
-def verificar_crear_archivo(archivo):
-    if not os.path.exists(archivo):
-        with open(archivo, "w", encoding="utf-8") as file:
-            json.dump({}, file, indent=4, ensure_ascii=False)
-        print(f"Archivo '{archivo}' creado exitosamente.")
 
-# Función para descargar datos de los indicadores
+# Función para descargar los datos desde la API de ESIOS
 def descargar_datos_indicadores(indicadores, fecha_inicio, fecha_fin, geo_id, api_key, archivo_salida):
+    # Inicializamos un diccionario para almacenar los datos de todos los indicadores
     todos_los_datos = {}
-    base_url = "https://api.esios.ree.es/indicators/"
-    headers = {"x-api-key": api_key, "Accept": "application/json"}
 
+    # URL base de la API de ESIOS
+    base_url = "https://api.esios.ree.es/indicators/"
+
+    # Encabezados para la solicitud
+    headers = {
+        "x-api-key": api_key,
+        "Accept": "application/json"
+    }
+
+    # Iterar sobre los identificadores de indicadores
     for indicador in indicadores:
+        # Construcción de la URL para cada indicador incluyendo el parámetro geo_id
         url = f"{base_url}{indicador}?start_date={fecha_inicio}T00%3A00%3A00&end_date={fecha_fin}T23%3A59%3A59&geo_id={geo_id}"
+
+        # Realizar la solicitud GET
         response = requests.get(url, headers=headers)
 
+        # Verificar si la respuesta fue exitosa
         if response.status_code == 200:
+            # Filtrar los datos para asegurarnos de que solo contienen el geo_id especificado
             datos = response.json()
-            datos_filtrados = [item for item in datos.get("indicator", {}).get("values", []) if item.get("geo_id") == geo_id]
+
+            # Filtrar los datos para geo_id=3 si están disponibles
+            datos_filtrados = [item for item in datos.get("indicator", {}).get("values", []) if
+                               item.get("geo_id") == geo_id]
+
+            # Guardar los datos filtrados del indicador en el diccionario
             todos_los_datos[indicador] = datos_filtrados
             print(f"Datos del indicador {indicador} descargados correctamente.")
         else:
             print(f"Error al descargar los datos del indicador {indicador}. Código de estado: {response.status_code}")
             print(f"Mensaje de error: {response.text}")
 
+    # Guardar todos los datos en un archivo JSON
     with open(archivo_salida, "w", encoding="utf-8") as archivo:
         json.dump(todos_los_datos, archivo, indent=4, ensure_ascii=False)
+
     print(f"Todos los datos descargados y guardados en '{archivo_salida}'.")
 
-# Función para cargar los datos desde el archivo
+
+# Función para cargar los datos desde el archivo JSON
 def cargar_datos(archivo):
     with open(archivo, 'r', encoding='utf-8') as file:
         datos = json.load(file)
         return datos
 
-# Función para procesar los datos
-def procesar_datos(datos, nombres_indicadores):
-    filas = []
+
+# Función para procesar los datos e incluir la variable 'Periodo' y 'fecha'
+def procesar_datos_con_fecha(datos, nombres_indicadores):
+    filas = []  # Lista para almacenar los registros procesados
+
     for indicador, valores in datos.items():
+        print(f"Procesando indicador {indicador} con {len(valores)} registros.")  # Depuración
+
         for item in valores:
-            # Convertir el 'datetime' a un objeto datetime de Python
-            fecha = datetime.fromisoformat(item['datetime']).replace(tzinfo=None)
+            # Verificar que los datos tengan las claves necesarias
+            if 'datetime' not in item or 'value' not in item:
+                print(f"Advertencia: Registro incompleto en indicador {indicador}: {item}")
+                continue
 
-            # Extraer el 'Periodo' a partir de la hora
-            periodo = fecha.hour + 1  # Para que el periodo vaya de 1 a 24
+            try:
+                # Convertir la fecha completa
+                fecha_hora = datetime.fromisoformat(
+                    item['datetime'].replace("Z", "+00:00"))  # Soporte para formato UTC/Z
 
-            filas.append({
-                "Indicador": nombres_indicadores.get(str(indicador), f"Indicador {indicador}"),
-                "Fecha": fecha,
-                "Valor": item['value'],
-                "Periodo": periodo  # Crear la nueva columna 'Periodo'
-            })
-    return pd.DataFrame(filas)
+                # Extraer solo la fecha
+                solo_fecha = fecha_hora.date()  # Esto devolverá solo la fecha como YYYY-MM-DD
+
+                # Calcular el periodo basado en la hora
+                hora = fecha_hora.hour
+                periodo = hora  + 1
+
+                # Agregar las claves nuevas
+                item['fecha'] = str(solo_fecha)  # Añadimos la clave 'fecha' al registro
+                item["Periodo"] = periodo  # Añadir el período
+                filas.append({
+                    "Indicador": nombres_indicadores.get(indicador, f"Indicador {indicador}"),
+                    "FechaHora": fecha_hora,
+                    "Valor": item['value'],
+                    "Periodo": periodo,
+                    "Fecha": solo_fecha,  # Incluimos solo la fecha
+                })
+            except Exception as e:
+                print(f"Error procesando el registro: {item}. Detalle: {e}")
+                continue
+
+    print(f"Procesamiento completado. Total de filas procesadas: {len(filas)}")  # Depuración
+    return filas, datos  # Devolvemos tanto los registros como los datos con la clave `fecha` añadida
+
 
 # Diccionario para mapear los nombres de los indicadores
 nombres_indicadores = {
-    "600": "Mercado diario",
-    "612": "Mercado intradiario 1",
-    "613": "Mercado intradiario 2",
-    "614": "Mercado intradiario 3",
+    "600": "Precio mercado diario",
+    "612": "Precio intradiario 1",
+    "613": "Precio intradiario 2",
+    "614": "Precio intradiario 3",
 }
 
-# Nombre del archivo JSON
-archivo_json = "market_data3.json"
+# Parámetros de la solicitud
+indicadores = [600, 612, 613, 614]  # Lista de los indicadores a descargar
+fecha_inicio = "2024-01-01"  # Fecha de inicio en formato yyyy-mm-dd
+fecha_fin = "2024-12-31"  # Fecha de fin en formato yyyy-mm-dd
+geo_id = 3  # ID geográfico
+api_key = "99e6f035c49454f9a148b53a32ff296e3012db82d2c8645d13b0ed7ff3e77aba"
+archivo_salida = "market_data.json"
 
-# Verificar si el archivo existe o crearlo
-verificar_crear_archivo(archivo_json)
+# Llamar a la función para descargar los datos
+descargar_datos_indicadores(indicadores, fecha_inicio, fecha_fin, geo_id, api_key, archivo_salida)
 
-# Cargar los datos
-datos = cargar_datos(archivo_json)
+# Cargar y procesar los datos
+datos = cargar_datos("market_data.json")
+registros_con_fecha, datos_actualizados = procesar_datos_con_fecha(datos, nombres_indicadores)
 
-# Procesar los datos y agregar la columna 'Periodo'
-df = procesar_datos(datos, nombres_indicadores)
+# Convertimos los datos procesados a un DataFrame para Streamlit
+df = pd.DataFrame(registros_con_fecha)
+
+# Guardar los datos procesados en el archivo JSON con la nueva clave 'fecha'
+with open("market_data_actualizado.json", "w", encoding="utf-8") as archivo:
+    json.dump(datos_actualizados, archivo, indent=4, ensure_ascii=False)
+
+print("Datos actualizados y guardados en 'market_data_actualizado.json'.")
 
 # Crear la interfaz de Streamlit
 st.title("PRECIOS SPOT MERCADO ELÉCTRICO ESPAÑA")
 
-# Filtro: Selector de fechas estilo calendario
+# Selector de rango de fechas
 st.sidebar.header("Filtros")
+min_fecha = df["Fecha"].min()  # Aquí debería existir la columna 'Fecha'
+max_fecha = df["Fecha"].max()  # Aquí debería existir la columna 'Fecha'
+rango_fechas = st.sidebar.date_input("Selecciona el rango de fechas", [min_fecha, max_fecha])
 
-# Selector de fechas múltiples con el calendario
-dias_seleccionados = st.sidebar.date_input(
-    "Selecciona las fechas",
-    value=[],  # Por defecto, no hay fechas seleccionadas
-    min_value=df["Fecha"].min().date(),
-    max_value=df["Fecha"].max().date()
+# Filtrar el DataFrame por rango de fechas
+if len(rango_fechas) == 2:
+    fecha_inicio, fecha_fin = rango_fechas
+    df_filtrado = df[(df["Fecha"] >= fecha_inicio) & (df["Fecha"] <= fecha_fin)]
+else:
+    df_filtrado = df
+
+# Calcular el promedio por periodo e indicador
+df_promedio = df_filtrado.groupby(["Periodo", "Indicador"], as_index=False)["Valor"].mean()
+df_promedio["Valor"] = df_promedio["Valor"].round(2)  # Redondear a dos decimales
+
+# Crear el gráfico interactivo con Plotly
+fig = px.line(
+    df_promedio,
+    x="Periodo",
+    y="Valor",
+    color="Indicador",
+    title="Precio medio por periodo",
+    labels={"Periodo": "Periodo", "Valor": "Precio (€/MWh)", "Indicador": "Mercado"},
+    markers=True
 )
 
-# Filtrar por fechas seleccionadas
-if dias_seleccionados:
-    df_filtrado = df[df["Fecha"].dt.date.isin(dias_seleccionados)]
-else:
-    df_filtrado = df  # Si no se selecciona nada, usar todos los datos
+# Mostrar el gráfico
 
-# Verificar si hay datos después del filtrado
-if not df_filtrado.empty:
-    # Calcular los promedios por periodo
-    promedios = df_filtrado.groupby(["Indicador", "Periodo"], as_index=False)["Valor"].mean()
+st.plotly_chart(fig, use_container_width=True)
 
-    # Crear el gráfico interactivo con Plotly
-    fig = px.line(
-        promedios,
-        x="Periodo",
-        y="Valor",
-        color="Indicador",
-        title="Precio medio por periodo",
-        labels={"Periodo": "Periodo", "Valor": "Precio (€/MWh)", "Indicador": "Mercado"},
-        markers=True
-    )
-
-    # Mostrar el gráfico
-    st.plotly_chart(fig, use_container_width=True)
-    # Añadir una nota al pie (side note)
-    st.markdown(
-        """
-        <p style='font-size: 12px; color: gray; text-align: center;'>
-        Desde el 15/06/2024, debido a un cambio regulatorio, se han modificado el número de sesiones intradiarias de 6 a 3, así como el horizonte de negociación.
-        </p>
-        """,
-        unsafe_allow_html=True
-    )
+# Añadir una nota al pie (side note)
+st.markdown(
+    """
+    <p style='font-size: 12px; color: gray; text-align: center;'>
+    Desde el 15/06/2024, debido a un cambio regulatorio, se han modificado el número de sesiones intradiarias de 6 a 3, así como el horizonte de negociación.
+    </p>
+    """,
+    unsafe_allow_html=True
