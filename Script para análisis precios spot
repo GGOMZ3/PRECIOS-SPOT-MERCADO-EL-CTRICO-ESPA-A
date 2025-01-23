@@ -1,0 +1,118 @@
+import requests 
+import json
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+from datetime import datetime
+
+# Función para descargar datos de los indicadores
+def descargar_datos_indicadores(indicadores, fecha_inicio, fecha_fin, geo_id, api_key, archivo_salida):
+    todos_los_datos = {}
+    base_url = "https://api.esios.ree.es/indicators/"
+    headers = {"x-api-key": api_key, "Accept": "application/json"}
+
+    for indicador in indicadores:
+        url = f"{base_url}{indicador}?start_date={fecha_inicio}T00%3A00%3A00&end_date={fecha_fin}T23%3A59%3A59&geo_id={geo_id}"
+        response = requests.get(url, headers=headers)
+
+        if response.status_code == 200:
+            datos = response.json()
+            datos_filtrados = [item for item in datos.get("indicator", {}).get("values", []) if item.get("geo_id") == geo_id]
+            todos_los_datos[indicador] = datos_filtrados
+            print(f"Datos del indicador {indicador} descargados correctamente.")
+        else:
+            print(f"Error al descargar los datos del indicador {indicador}. Código de estado: {response.status_code}")
+            print(f"Mensaje de error: {response.text}")
+
+    with open(archivo_salida, "w", encoding="utf-8") as archivo:
+        json.dump(todos_los_datos, archivo, indent=4, ensure_ascii=False)
+    print(f"Todos los datos descargados y guardados en '{archivo_salida}'.")
+
+# Función para cargar los datos desde el archivo
+def cargar_datos(archivo):
+    with open(archivo, 'r', encoding='utf-8') as file:
+        datos = json.load(file)
+        return datos
+
+
+# Función para procesar los datos
+def procesar_datos(datos, nombres_indicadores):
+    filas = []
+    for indicador, valores in datos.items():
+        for item in valores:
+            # Convertir el 'datetime' a un objeto datetime de Python
+            fecha = datetime.fromisoformat(item['datetime']).replace(tzinfo=None)
+
+            # Extraer el 'Periodo' a partir de la hora
+            periodo = fecha.hour + 1  # Para que el periodo vaya de 1 a 24
+
+            filas.append({
+                "Indicador": nombres_indicadores.get(str(indicador), f"Indicador {indicador}"),
+                "Fecha": fecha,
+                "Valor": item['value'],
+                "Periodo": periodo  # Crear la nueva columna 'Periodo'
+            })
+    return pd.DataFrame(filas)
+
+
+# Diccionario para mapear los nombres de los indicadores
+nombres_indicadores = {
+    "600": "Mercado diario",
+    "612": "Mercado intradiario 1",
+    "613": "Mercado intradiario 2",
+    "614": "Mercado intradiario 3",
+}
+
+# Cargar los datos
+datos = cargar_datos("market_data3.json")
+
+# Procesar los datos y agregar la columna 'Periodo'
+df = procesar_datos(datos, nombres_indicadores)
+
+# Crear la interfaz de Streamlit
+st.title("PRECIOS SPOT MERCADO ELÉCTRICO ESPAÑA")
+
+# Filtro: Selector de fechas estilo calendario
+st.sidebar.header("Filtros")
+
+# Selector de fechas múltiples con el calendario
+dias_seleccionados = st.sidebar.date_input(
+    "Selecciona las fechas",
+    value=[],  # Por defecto, no hay fechas seleccionadas
+    min_value=df["Fecha"].min().date(),
+    max_value=df["Fecha"].max().date()
+)
+
+# Filtrar por fechas seleccionadas
+if dias_seleccionados:
+    df_filtrado = df[df["Fecha"].dt.date.isin(dias_seleccionados)]
+else:
+    df_filtrado = df  # Si no se selecciona nada, usar todos los datos
+
+# Verificar si hay datos después del filtrado
+if not df_filtrado.empty:
+    # Calcular los promedios por periodo
+    promedios = df_filtrado.groupby(["Indicador", "Periodo"], as_index=False)["Valor"].mean()
+
+    # Crear el gráfico interactivo con Plotly
+    fig = px.line(
+        promedios,
+        x="Periodo",
+        y="Valor",
+        color="Indicador",
+        title="Precio medio por periodo",
+        labels={"Periodo": "Periodo", "Valor": "Precio (\u20ac/MWh)", "Indicador": "Mercado"},
+        markers=True
+    )
+
+    # Mostrar el gráfico
+    st.plotly_chart(fig, use_container_width=True)
+    # Añadir una nota al pie (side note)
+    st.markdown(
+        """
+        <p style='font-size: 12px; color: gray; text-align: center;'>
+        Desde el 15/06/2024, debido a un cambio regulatorio, se han modificado el número de sesiones intradiarias de 6 a 3, así como el horizonte de negociación.
+        </p>
+        """,
+        unsafe_allow_html=True
+    )
